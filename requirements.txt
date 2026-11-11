@@ -1,0 +1,7 @@
+# Ставится ОДИН раз внутри python-контейнера:
+#   docker compose exec py pip install -r /app/requirements.txt
+minio>=7.2,<8
+qdrant-client>=1.12,<2
+sentence-transformers>=3.0,<4
+streamlit>=1.40,<2
+requests>=2.31,<3

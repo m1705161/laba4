@@ -1,0 +1,57 @@
+# Лаба 4 «RAG-пайплайн» — 4 контейнера
+# MinIO (форк Silo) + Qdrant + Ollama + python (Streamlit)
+#
+# Поднять:   docker compose up -d
+# Остановить: docker compose down
+# Логи:      docker compose logs -f
+
+services:
+  minio:
+    image: pgsty/silo:latest            # форк MinIO (официальные образы minio/minio ушли из Docker Hub)
+    container_name: rag-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"    # S3 API (сюда ходят скрипты)
+      - "9001:9001"    # веб-консоль MinIO
+    volumes:
+      - minio-data:/data
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: rag-qdrant
+    ports:
+      - "6333:6333"    # HTTP API + встроенный dashboard (http://localhost:6333/dashboard)
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: rag-ollama
+    ports:
+      - "11434:11434"  # REST API (http://localhost:11434)
+    volumes:
+      - ollama-models:/root/.ollama
+
+  py:
+    image: python:3.12-slim
+    container_name: rag-py
+    working_dir: /app
+    volumes:
+      - .:/app                                  # весь каталог лабы виден в контейнере
+      - hf-cache:/root/.cache/huggingface       # кэш модели MiniLM (не качается заново)
+    ports:
+      - "8501:8501"   # Streamlit UI
+    command: sleep infinity
+    depends_on:
+      - minio
+      - qdrant
+      - ollama
+
+volumes:
+  minio-data:
+  qdrant-data:
+  ollama-models:
+  hf-cache:
