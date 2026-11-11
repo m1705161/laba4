@@ -36,6 +36,259 @@ docker compose exec ollama ollama pull qwen2.5:3b
 
 Проверка, что Ollama жива: открой http://localhost:11434 (страница отвечает).
 
+## Шаг 1.5. Создать скрипты (retrieve, ask, evaluate, app)
+
+Скопируй четыре блока целиком — каждый создаст свой файл в `03-вопрос-ответ-ui\`.
+Править в них ничего не нужно.
+
+```powershell
+[System.IO.File]::WriteAllText("$PWD\03-вопрос-ответ-ui\retrieve.py", @'
+"""Стадия 3 — Retriever: вопрос -> top-k чанков из Qdrant.
+
+Запуск (внутри python-контейнера):
+  docker compose exec py python /app/03-вопрос-ответ-ui/retrieve.py --chunk-size 500 "что такое lakehouse?"
+"""
+import argparse
+
+from qdrant_client import QdrantClient
+from sentence_transformers import SentenceTransformer
+
+QDRANT_URL = "http://qdrant:6333"
+MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--chunk-size", type=int, required=True)
+    ap.add_argument("--k", type=int, default=3)
+    ap.add_argument("question")
+    args = ap.parse_args()
+
+    model = SentenceTransformer(MODEL_NAME)
+    qd = QdrantClient(url=QDRANT_URL)
+    qv = model.encode(args.question).tolist()
+
+    hits = qd.query_points(collection_name=f"chunks_{args.chunk_size}",
+                           query=qv, limit=args.k).points
+
+    print(f"Вопрос: {args.question}\n")
+    for h in hits:
+        p = h.payload
+        print(f"doc_id={p['doc_id']}  chunk_id={h.id}  sim={h.score:.3f}")
+        print("  " + p["chunk_text"][:180].replace("\n", " "))
+        print()
+
+
+if __name__ == "__main__":
+    main()
+'@)
+```
+
+```powershell
+[System.IO.File]::WriteAllText("$PWD\03-вопрос-ответ-ui\ask.py", @'
+"""Стадия 3 — Генерация: вопрос -> ответ через Ollama, с RAG и без (сравнение).
+
+Перед первым запуском скачайте модель (один раз):
+  docker compose exec ollama ollama pull qwen2.5:1.5b
+
+Запуск (внутри python-контейнера):
+  docker compose exec py python /app/03-вопрос-ответ-ui/ask.py --chunk-size 500 --model qwen2.5:1.5b "что такое lakehouse?"
+  docker compose exec py python /app/03-вопрос-ответ-ui/ask.py --chunk-size 500 --model qwen2.5:1.5b --no-rag "что такое lakehouse?"
+"""
+import argparse
+
+import requests
+from qdrant_client import QdrantClient
+from sentence_transformers import SentenceTransformer
+
+QDRANT_URL = "http://qdrant:6333"
+OLLAMA_URL = "http://ollama:11434"
+MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
+
+def chat(model, prompt):
+    r = requests.post(
+        f"{OLLAMA_URL}/api/chat",
+        json={"model": model, "stream": False,
+              "messages": [{"role": "user", "content": prompt}]},
+        timeout=600,
+    )
+    r.raise_for_status()
+    return r.json()["message"]["content"]
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--chunk-size", type=int, required=True)
+    ap.add_argument("--model", default="qwen2.5:1.5b")
+    ap.add_argument("--k", type=int, default=3)
+    ap.add_argument("--no-rag", action="store_true",
+                    help="спросить LLM БЕЗ контекста (чистая модель)")
+    ap.add_argument("question")
+    args = ap.parse_args()
+
+    if args.no_rag:
+        print(f"=== БЕЗ RAG (модель {args.model}, без контекста) ===\n")
+        print(chat(args.model, args.question))
+        return
+
+    model = SentenceTransformer(MODEL_NAME)
+    qd = QdrantClient(url=QDRANT_URL)
+    qv = model.encode(args.question).tolist()
+    hits = qd.query_points(collection_name=f"chunks_{args.chunk_size}",
+                           query=qv, limit=args.k).points
+    context = "\n".join(h.payload["chunk_text"] for h in hits)
+
+    prompt = (
+        "Отвечай ТОЛЬКО по контексту ниже. Если в контексте нет ответа — "
+        "напиши, что не знаешь.\n\n"
+        f"Контекст:\n{context}\n\n"
+        f"Вопрос: {args.question}"
+    )
+    print(f"=== С RAG (модель {args.model}, chunks_{args.chunk_size}) ===\n")
+    print(chat(args.model, prompt))
+    print("\n--- найденные чанки ---")
+    for h in hits:
+        print(f"  doc_id={h.payload['doc_id']}  sim={h.score:.3f}")
+
+
+if __name__ == "__main__":
+    main()
+'@)
+```
+
+```powershell
+[System.IO.File]::WriteAllText("$PWD\03-вопрос-ответ-ui\evaluate.py", @'
+"""Стадия 3 — Оценка retrieval: recall@k и MRR по золотому набору gold.csv.
+
+Формат gold.csv (заголовки обязательны):
+    question,doc_id
+    "что такое lakehouse?",1
+    ...
+
+Запуск (внутри python-контейнера):
+  docker compose exec py python /app/03-вопрос-ответ-ui/evaluate.py --chunk-size 200 --gold /app/03-вопрос-ответ-ui/eval/gold.csv
+"""
+import argparse
+import csv
+
+from qdrant_client import QdrantClient
+from sentence_transformers import SentenceTransformer
+
+QDRANT_URL = "http://qdrant:6333"
+MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--chunk-size", type=int, required=True)
+    ap.add_argument("--gold", default="/app/03-вопрос-ответ-ui/eval/gold.csv")
+    ap.add_argument("--k", type=int, default=5)
+    ap.add_argument("--recall-at", type=int, default=3)
+    args = ap.parse_args()
+
+    model = SentenceTransformer(MODEL_NAME)
+    qd = QdrantClient(url=QDRANT_URL)
+
+    with open(args.gold, encoding="utf-8") as f:
+        gold = list(csv.DictReader(f))
+
+    hits, mrr = 0, 0.0
+    for g in gold:
+        qv = model.encode(g["question"]).tolist()
+        res = qd.query_points(collection_name=f"chunks_{args.chunk_size}",
+                              query=qv, limit=args.k).points
+        got = [h.payload["doc_id"] for h in res]
+        want = int(g["doc_id"])
+        if want in got[:args.recall_at]:
+            hits += 1
+        rank = next((i + 1 for i, d in enumerate(got) if d == want), None)
+        if rank:
+            mrr += 1.0 / rank
+        print(f"Q: {g['question'][:52]:<52} gold={want} top-{args.k}={got}")
+
+    n = len(gold)
+    print(f"\nchunk_size={args.chunk_size}: "
+          f"recall@{args.recall_at} = {hits}/{n} = {hits / n:.2f}, "
+          f"MRR = {mrr / n:.3f}")
+
+
+if __name__ == "__main__":
+    main()
+'@)
+```
+
+```powershell
+[System.IO.File]::WriteAllText("$PWD\03-вопрос-ответ-ui\app.py", @'
+"""Стадия 3 — Streamlit UI: вопрос -> топ-чанки + ответ (Ollama).
+
+Запуск (из каталога лабы, держит терминал):
+  docker compose exec py streamlit run /app/03-вопрос-ответ-ui/app.py \
+      --server.address 0.0.0.0 --server.port 8501
+Открыть: http://localhost:8501
+"""
+import requests
+import streamlit as st
+from qdrant_client import QdrantClient
+from sentence_transformers import SentenceTransformer
+
+QDRANT_URL = "http://qdrant:6333"
+OLLAMA_URL = "http://ollama:11434"
+MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
+
+@st.cache_resource
+def load_embedder():
+    return SentenceTransformer(MODEL_NAME)
+
+
+def retrieve(question, chunk_size, k):
+    emb = load_embedder().encode(question).tolist()
+    qd = QdrantClient(url=QDRANT_URL)
+    return qd.query_points(collection_name=f"chunks_{chunk_size}",
+                           query=emb, limit=k).points
+
+
+def chat(model, prompt):
+    r = requests.post(
+        f"{OLLAMA_URL}/api/chat",
+        json={"model": model, "stream": False,
+              "messages": [{"role": "user", "content": prompt}]},
+        timeout=600,
+    )
+    r.raise_for_status()
+    return r.json()["message"]["content"]
+
+
+st.title("RAG: вопрос → ответ по своим документам")
+
+chunk_size = st.selectbox("Коллекция (размер чанка)", [200, 500, 1000], index=1)
+model = st.selectbox("LLM", ["qwen2.5:0.5b", "qwen2.5:1.5b", "qwen2.5:3b"], index=1)
+k = st.slider("top-k", 1, 10, 3)
+use_rag = st.checkbox("Использовать RAG (подставлять контекст)", value=True)
+question = st.text_input("Вопрос", placeholder="что такое lakehouse?")
+
+if st.button("Спросить") and question:
+    if use_rag:
+        hits = retrieve(question, chunk_size, k)
+        context = "\n".join(h.payload["chunk_text"] for h in hits)
+        prompt = f"Отвечай ТОЛЬКО по контексту:\n{context}\n\nВопрос: {question}"
+        with st.spinner("Генерация..."):
+            answer = chat(model, prompt)
+        st.markdown("### Ответ (с RAG)")
+        st.write(answer)
+        st.markdown("### Найденные чанки")
+        for h in hits:
+            st.markdown(f"**doc_id={h.payload['doc_id']}** · sim={h.score:.3f}")
+            st.text(h.payload["chunk_text"][:300])
+    else:
+        with st.spinner("Генерация..."):
+            answer = chat(model, question)
+        st.markdown("### Ответ (без RAG)")
+        st.write(answer)
+'@)
+```
+
 ## Шаг 2. Проверить поиск (retriever) из консоли
 
 ```powershell

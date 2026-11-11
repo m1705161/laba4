@@ -4,6 +4,14 @@
 # Генерируется во время лабы
 01-загрузка-реестр/manifest.json
 
+# Скрипты создаются студентом из гайда (код — в guide.md / guide-win.md)
+01-загрузка-реестр/loader.py
+02-чанки-эмбеддинги-векторы/chunk_embed.py
+03-вопрос-ответ-ui/retrieve.py
+03-вопрос-ответ-ui/ask.py
+03-вопрос-ответ-ui/evaluate.py
+03-вопрос-ответ-ui/app.py
+
 # Python
 __pycache__/
 *.py[cod]
