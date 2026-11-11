@@ -21,12 +21,13 @@ RAG = **R**etrieval-**A**ugmented **G**eneration. Сначала система 
 ## Что уже должно быть готово
 
 - Установлен Docker (Desktop или аналог).
-- Ты в каталоге лабы `лаба-rag-4часа/` (там лежит `docker-compose.yml`).
+- Ты в каталоге лабы (папка `laba4`, если клонировал репозиторий через `git clone`;
+  если скачал ZIP — распакованная папка; там лежит `docker-compose.yml`).
 
 ## Шаг 0. Поднять стек (4 контейнера)
 
 ```bash
-cd лаба-rag-4часа
+cd laba4
 docker compose up -d
 docker compose ps
 ```

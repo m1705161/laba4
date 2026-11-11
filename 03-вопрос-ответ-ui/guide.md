@@ -168,7 +168,7 @@ cat > 03-вопрос-ответ-ui/evaluate.py << 'EOF'
     ...
 
 Запуск (внутри python-контейнера):
-  docker compose exec py python /app/03-вопрос-ответ-ui/evaluate.py --chunk-size 200 --gold /app/03-вопрос-ответ-ui/eval/gold.csv
+  docker compose exec py python /app/03-вопрос-ответ-ui/evaluate.py --chunk-size 200 --gold /app/documents/cs/gold.csv
 """
 import argparse
 import csv
@@ -183,7 +183,8 @@ MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--chunk-size", type=int, required=True)
-    ap.add_argument("--gold", default="/app/03-вопрос-ответ-ui/eval/gold.csv")
+    ap.add_argument("--gold", required=True,
+                    help="путь к gold.csv, напр. /app/documents/cs/gold.csv")
     ap.add_argument("--k", type=int, default=5)
     ap.add_argument("--recall-at", type=int, default=3)
     args = ap.parse_args()
@@ -355,7 +356,8 @@ docker compose exec py streamlit run /app/03-вопрос-ответ-ui/app.py \
 
 ## Шаг 5. Замерить качество поиска (recall@3 / MRR)
 
-Сначала напиши **золотой набор** — файл `gold.csv` в папке твоей сферы. Формат:
+**Золотой набор** — файл `gold.csv` — уже лежит в папке твоей сферы (например
+`documents/cs/gold.csv`). Формат:
 
 ```csv
 question,doc_id
@@ -364,7 +366,7 @@ question,doc_id
 ```
 
 Каждая строка = вопрос и номер **правильного** документа (`doc_id` из имени файла).
-Достаточно 5–8 вопросов — по одному-два на документ. Это твоя «эталонная правда».
+Хочешь — допиши свои строки (по одному-два вопроса на документ). Это твоя «эталонная правда».
 
 Затем запусти оценку для каждой коллекции:
 
